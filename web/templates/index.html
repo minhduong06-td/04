@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{.Title}}</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="container">
+  <h1>{{.Title}}</h1>
+  <p>Submit a GNU C17 program. The system compiles and executes your code in an isolated sandbox.</p>
+  <p class="note">Maximum source size: <strong>{{.MaxSourceMiB}} MiB</strong> ({{.MaxSourceBytes}} bytes). Language: GNU C17.</p>
+
+  <form id="submit-form" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+
+    <div class="form-group">
+      <label for="source_text">Source code:</label>
+      <textarea id="source_text" name="source_text" rows="20" placeholder="Paste your C source code here..."></textarea>
+    </div>
+
+    <div class="form-group">
+      <label for="source_file">Or upload a .c file:</label>
+      <input type="file" id="source_file" name="source_file" accept=".c">
+    </div>
+
+    <div class="form-actions">
+      <button type="submit" id="submit-btn">Submit</button>
+    </div>
+
+    <div id="error-area" class="error" style="display:none;"></div>
+  </form>
+
+  <div id="result-area" style="display:none;">
+    <p>Submission queued. <a id="result-link" href="">View result</a></p>
+  </div>
+</div>
+
+<script src="/static/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,152 @@
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hustack
+      POSTGRES_PASSWORD: hustack
+      POSTGRES_DB: hustack
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hustack"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redisdata:/data
+    networks:
+      - internal
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["/app/api"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: "postgres://hustack:hustack@postgres:5432/hustack?sslmode=disable"
+      REDIS_ADDR: "redis:6379"
+      SOURCE_STORAGE_ROOT: /var/lib/hustack/sources
+      COOKIE_HMAC_SECRET: ${COOKIE_HMAC_SECRET:-dev-secret-change-in-production-min-32-chars!!}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+      MAX_SOURCE_BYTES: ${MAX_SOURCE_BYTES:-10485760}
+      QUEUE_MAX_DEPTH: ${QUEUE_MAX_DEPTH:-500}
+      SUBMIT_RATE_PER_MINUTE: ${SUBMIT_RATE_PER_MINUTE:-6}
+      SUBMIT_RATE_PER_HOUR: ${SUBMIT_RATE_PER_HOUR:-120}
+      IP_SUBMIT_RATE_PER_MINUTE: ${IP_SUBMIT_RATE_PER_MINUTE:-20}
+      POLL_RATE_PER_MINUTE: ${POLL_RATE_PER_MINUTE:-60}
+      MAX_QUEUED_PER_PARTICIPANT: ${MAX_QUEUED_PER_PARTICIPANT:-3}
+      MAX_RUNNING_PER_PARTICIPANT: ${MAX_RUNNING_PER_PARTICIPANT:-1}
+      MOCK_WORK_DURATION: ${MOCK_WORK_DURATION:-200ms}
+      TRUSTED_PROXY_CIDR: ${TRUSTED_PROXY_CIDR:-172.18.0.0/16}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    volumes:
+      - sources:/var/lib/hustack/sources
+    networks:
+      - internal
+    restart: unless-stopped
+    user: "1001:1001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16M
+    read_only: true
+
+  mock-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["/app/mock-worker"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: "postgres://hustack:hustack@postgres:5432/hustack?sslmode=disable"
+      REDIS_ADDR: "redis:6379"
+      SOURCE_STORAGE_ROOT: /var/lib/hustack/sources
+      COOKIE_HMAC_SECRET: ${COOKIE_HMAC_SECRET:-dev-secret-change-in-production-min-32-chars!!}
+      MAX_SOURCE_BYTES: ${MAX_SOURCE_BYTES:-10485760}
+      QUEUE_MAX_DEPTH: ${QUEUE_MAX_DEPTH:-500}
+      MOCK_WORK_DURATION: ${MOCK_WORK_DURATION:-200ms}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - sources:/var/lib/hustack/sources
+    networks:
+      - internal
+    restart: unless-stopped
+    user: "1001:1001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16M
+    read_only: true
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    tmpfs:
+      - /var/run:noexec,nosuid,size=1M
+      - /var/cache/nginx:noexec,nosuid,size=8M
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - internal
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pgdata:
+  redisdata:
+  sources:
+
+networks:
+  internal:
+    driver: bridge
