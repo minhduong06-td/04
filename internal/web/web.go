@@ -103,16 +103,21 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.store.Read("__readyz_check__"); err != nil {
-		_, writeErr := os.Stat(s.cfg.SourceStorageRoot)
-		if writeErr != nil {
-			s.logger.Warn("readyz storage", "error", writeErr)
-			w.Header().Set("Content-Type", "text/plain")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte("storage: unreachable"))
-			return
-		}
+	f, err := os.CreateTemp(s.cfg.SourceStorageRoot, ".readyz-*")
+	if err != nil {
+		s.logger.Warn("readyz storage", "error", err)
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("storage: not writable"))
+		return
 	}
+	name := f.Name()
+	if err := f.Close(); err != nil {
+		os.Remove(name)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	os.Remove(name)
 
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)
