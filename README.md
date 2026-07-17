@@ -55,6 +55,7 @@ make fmt              # Format Go source code
 make lint             # Run go vet
 make test             # Run unit tests (short mode)
 make integration-test # Run integration tests
+make phase1-acceptance # Rebuild and run the destructive, isolated Phase 1 gate
 make logs             # Follow container logs
 ```
 
@@ -63,16 +64,21 @@ make logs             # Follow container logs
 ```
 Nginx (port 8080)
   └── Go API (:8080)
-        ├── PostgreSQL (metadata)
-        └── Redis (queue + rate limit)
-              └── Mock Worker (async job processing)
+        ├── PostgreSQL (authoritative lifecycle, quotas, outbox)
+        └── Redis (Streams delivery transport + rate limits)
+              ⇅
+            Mock Worker (outbox dispatch, stream consume, stale recovery)
 ```
 
 - **Nginx**: Reverse proxy, request body limit, rate limiting, security headers
 - **Go API**: Submission handling, validation, identity management, CSRF protection
-- **PostgreSQL**: Submission metadata and participant records
-- **Redis**: Bounded job queue and distributed token-bucket rate limiter
-- **Mock Worker**: Consumes queued jobs, simulates processing (200ms delay), writes mock results
+- **PostgreSQL**: Authoritative `queued`/`mock_processing` lifecycle, global capacity, participant queued/running quotas, and transactional enqueue outbox
+- **Redis**: Distributed token buckets and the `hustack:queue:v2` at-least-once Stream transport; consumer group `mock-workers`
+- **Mock Worker**: Dispatches committed outbox events with `XADD`, consumes new messages with `XREADGROUP`, reclaims stale pending messages with `XAUTOCLAIM`, and conditionally finishes database rows
+
+Submission creation commits the queued row and enqueue outbox event together. A Redis outage therefore cannot lose an accepted submission. A lost Redis response may produce a duplicate Stream entry; conditional PostgreSQL transitions make duplicates safe. Completed or obsolete deliveries use `XACK` followed by `XDEL`. This is not distributed exactly-once: if `XDEL` fails, an acknowledged record may remain in the Stream until cleanup, but it is no longer pending.
+
+Stale `mock_processing` rows are conditionally returned to `queued` and receive a new outbox event in the same PostgreSQL transaction. Redis lifecycle counters and Go-side Redis/PostgreSQL compensation are not used.
 
 ## Upload limits
 
@@ -107,6 +113,7 @@ Phase 1 uses cookie-based identity:
 ```bash
 make test              # Unit tests (no external dependencies needed for most)
 make integration-test  # Integration tests (requires running Docker environment)
+make phase1-acceptance # Full clean rebuild, real dependency, and isolated acceptance gate
 ```
 
 ## Security notes

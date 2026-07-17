@@ -1,0 +1,36 @@
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:25432:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:26379:6379"
+
+  api:
+    image: 04-api
+    ports:
+      - "127.0.0.1:18080:8080"
+    environment:
+      QUEUE_MAX_DEPTH: ${ACCEPT_QUEUE_MAX_DEPTH:-50}
+      SUBMIT_RATE_PER_MINUTE: ${ACCEPT_SUBMIT_RATE_PER_MINUTE:-2}
+      SUBMIT_RATE_PER_HOUR: 1000
+      IP_SUBMIT_RATE_PER_MINUTE: 1000
+      MAX_QUEUED_PER_PARTICIPANT: 50
+      MAX_RUNNING_PER_PARTICIPANT: 10
+      MOCK_WORK_DURATION: 4s
+      WORKER_HARD_TIMEOUT: 10s
+      WORKER_STALE_AFTER: 30s
+
+  mock-worker:
+    image: 04-mock-worker
+    environment:
+      QUEUE_MAX_DEPTH: ${ACCEPT_QUEUE_MAX_DEPTH:-50}
+      MAX_QUEUED_PER_PARTICIPANT: 50
+      MAX_RUNNING_PER_PARTICIPANT: 10
+      MOCK_WORK_DURATION: 4s
+      WORKER_HARD_TIMEOUT: 10s
+      WORKER_STALE_AFTER: 30s
+  nginx:
+    volumes:
+      - ./tests/nginx.acceptance.conf:/etc/nginx/nginx.conf:ro

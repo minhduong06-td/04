@@ -22,20 +22,18 @@
 - **Per participant**: 6/minute + 120/hour using separate token buckets
 - **Per IP**: 20/minute via `X-Forwarded-For` or `RemoteAddr` (from trusted proxy or direct)
 - **Polling**: 60/minute per participant for result polling
-- **Queue quota**: Max 3 queued, max 1 processing per participant (tracked via Redis atomic Lua counters)
-- **Global queue depth**: Hard limit of 500 jobs; returns HTTP 503 when full
+- **Queue quotas**: PostgreSQL is authoritative. Submission transactions enforce max 3 queued per participant and a global active (`queued` plus `mock_processing`) limit of 500; claim transactions enforce max 1 `mock_processing` per participant.
+- **Global capacity response**: HTTP 503 with `Retry-After`; participant queued quota returns HTTP 409.
 - **Response codes**: 429 (rate limit), 409 (quota), 413 (body/source too large), 503 (queue full), with `Retry-After` header
 
-## Queue backpressure
+## Queue backpressure and delivery
 
-- Redis list used as bounded queue (`LPUSH` for enqueue, `BLMOVE` for claim from Go code)
-- **No blocking commands inside Lua**: `BLMOVE`/`BRPOPLPUSH` called from Go side; Lua scripts are non-blocking (counter updates only)
-- Queue depth checked before every enqueue via Lua atomic check
-- When full, API returns HTTP 503 immediately — no job accepted
-- Queue items carry participant ID via Redis key `:participant:<submission_id>` for worker lookup
-- Mock worker uses `BLMOVE` for safe job claiming with lease tracking
-- Complete/Fail updates running counter for the correct participant
-- Stale job recovery scans processing list, checks `running_since` timestamp, uses Lua to move back + update Redis counters, then Go updates PostgreSQL status
+- PostgreSQL is the lifecycle and quota source of truth for queued and `mock_processing` rows, global active capacity, and participant queued/running quotas.
+- Submission creation takes transaction-scoped advisory locks, enforces capacity/queued quota, and commits the submission plus an `enqueue_submission` outbox event atomically. A rejected transaction creates neither row.
+- Redis Stream `hustack:queue:v2`, consumer group `mock-workers`, is transport only. Outbox delivery uses `XADD`; workers use `XREADGROUP`; stale pending delivery uses `XAUTOCLAIM`.
+- Redis outage after database acceptance cannot lose a submission because the outbox remains retryable. Response loss can duplicate `XADD`; duplicate transport delivery is expected and safe because PostgreSQL starts and finishes rows with conditional transitions.
+- Workers acknowledge obsolete/completed entries with `XACK`, then trim that exact record with `XDEL`. These two commands are not distributed exactly-once: an `XDEL` failure can leave an acknowledged record until later cleanup, but cannot make it pending again.
+- Stale `mock_processing` recovery is one PostgreSQL transaction: conditionally return the row to `queued` and insert a new enqueue outbox event. It does not use Redis lifecycle counters or a Go-side compensating Redis move.
 
 ## CSRF
 
@@ -93,7 +91,7 @@
 
 - Nginx sets `X-Forwarded-For $remote_addr` and `X-Real-IP $remote_addr`, overwriting any client-supplied value
 - API only trusts proxy headers when request comes from `TRUSTED_PROXY_CIDR`
-- Default Compose CIDR: `172.0.0.0/8` covers Docker bridge networks
+- Current Compose `TRUSTED_PROXY_CIDR` default: `172.18.0.0/16`
 - Untrusted clients cannot spoof their IP via headers
 
 ## Logging

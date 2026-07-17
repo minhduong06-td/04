@@ -53,23 +53,37 @@ Real service gates used fresh `redis:7-alpine` and `postgres:16-alpine`
 containers.
 
 ```text
-HUSTACK_REQUIRE_POSTGRES=1 go test ./internal/database -count=20       PASS
-HUSTACK_REQUIRE_POSTGRES=1 go test -race ./internal/database -count=10 PASS
-HUSTACK_REQUIRE_REDIS=1 go test -v ./internal/queue -count=1          PASS, 0 SKIP
-HUSTACK_REQUIRE_REDIS=1 go test ./internal/queue -count=20            PASS
-HUSTACK_REQUIRE_REDIS=1 go test -race ./internal/queue -count=10      PASS
-go vet ./...                                                           PASS
-go build ./...                                                         PASS
-go test ./...                                                          PASS
-go test -race ./...                                                    PASS
+make phase1-acceptance                                                 PASS
+gofmt -l .                                                             PASS (no output)
+GOCACHE=/tmp/hustack-go-cache go mod tidy                              PASS
+git diff -- go.mod go.sum                                              PASS (no changes)
+GOCACHE=/tmp/hustack-go-cache go vet ./...                             PASS
+GOCACHE=/tmp/hustack-go-cache go build ./...                           PASS
+GOCACHE=/tmp/hustack-go-cache go test ./...                            PASS
+GOCACHE=/tmp/hustack-go-cache go test -race ./...                      PASS
 docker compose config --quiet                                         PASS
-make integration-test                                                 PASS
 git diff --check                                                       PASS
 ```
 
-Focused repeated executions: 60 database test executions plus 30 database race
-executions; 120 Redis test executions plus 60 Redis race executions. The final
-integration suite ran 24 tests. Required skipped-test count: **0**.
+The clean gate ran 41 ordinary Go test cases, 24 normal HTTP integration cases,
+4 isolated compliance cases, 3 real PostgreSQL cases plus their race run, and 6
+real Redis 7 cases plus their race run. Required skipped-test count: **0**.
+
+The isolated cases prove all previously missing acceptance evidence:
+
+- direct loopback API requests allow two submissions and return an application
+  JSON 429 with a positive `Retry-After` on the third;
+- a test-only Nginx limit of 1 request/minute produces a distinct non-JSON 429;
+- `QUEUE_MAX_DEPTH=1` accepts one participant and returns 503 with
+  `Retry-After` for a second participant while PostgreSQL remains at exactly
+  one submission/one outbox row and the source volume gains only the accepted
+  file;
+- a controlled PostgreSQL fixture stores literal hostile stdout/stderr, the
+  owner JSON receives the exact strings as data, server-rendered HTML does not
+  embed them, and a focused source check enforces text-only frontend sinks.
+
+The application-rate case also found and fixed a malformed `Retry-After`
+conversion that appended a NUL byte; `internal/web` now has a regression test.
 
 ## Fresh image and service evidence
 
@@ -77,8 +91,8 @@ The acceptance sequence ran `docker compose down -v --remove-orphans`, then
 `docker compose build --no-cache api mock-worker`, followed by force recreation.
 Fresh image IDs reported were:
 
-- API: `sha256:e1fa08d910649ee97f93271ad41ec71573ab088e034e9225f3b31a649b8717db`
-- mock-worker: `sha256:e5e6193e45dc46764759a954179091bd7ebc844acd36d8098a04f5608e958e8d`
+- API: `sha256:e33f708195c400f38f9e86609fcbdc81c878caffae6adfa90da542ba7b5013bd`
+- mock-worker: `sha256:e5bdc7106ba5c80fc6ef0204a99b1a84b8cced431b8d41d0772622d564c33b60`
 
 PostgreSQL, Redis, API, and Nginx reported healthy; mock-worker remained running.
 Only Nginx publishes a host port. Readiness checks PostgreSQL, Redis, and an
@@ -86,10 +100,22 @@ actual create/write/remove operation in source storage; healthz remains
 liveness-only.
 
 Integration coverage verified textarea and `.c` submissions, immediate queued
-responses, asynchronous completion, owner-only access, escaped script markup,
-size limits including 10 MiB boundaries, CSRF/origin handling, and health routes.
-Database concurrency tests verify participant/global quotas and one running job
-per participant; rate-limit packages retain their unit coverage.
+responses, asynchronous completion, owner-only access, actual hostile result
+handling, size limits including 10 MiB boundaries, CSRF/origin handling,
+application and Nginx 429 responses, global-capacity 503 atomicity, and health
+routes. Database concurrency tests verify participant/global quotas and one
+running job per participant; minute/hour/IP token buckets retain unit coverage.
+
+`make phase1-acceptance` is the reproducible destructive gate. It starts with a
+volume-clean normal stack and no-cache API/worker build, runs normal tests, then
+uses a separate Compose project with only loopback test ports for PostgreSQL,
+Redis, and the direct API. It removes that project and its volumes and restores
+the normal healthy stack before returning. Normal Compose still publishes only
+Nginx on port 8080.
+
+README and the security notes now document PostgreSQL lifecycle/quota authority,
+the transactional outbox, Redis Streams delivery/XAUTOCLAIM, duplicate-delivery
+safety, stale database recovery, and the non-exactly-once XACK-then-XDEL caveat.
 
 ## Phase 2 limitations
 

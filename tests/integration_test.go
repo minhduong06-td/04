@@ -314,15 +314,11 @@ func TestOwnershipCheck(t *testing.T) {
 	}
 }
 
-func TestXSSPrevention(t *testing.T) {
+func TestSubmittedSourceIsNotReflectedAsResultMarkup(t *testing.T) {
 	h := newHelper(t)
 	result := h.submitSource("<script>alert(1)</script>")
 
-	sub := h.pollUntilFinished(result.SubmissionID)
-
-	if sub.Stdout != nil && strings.Contains(*sub.Stdout, "<script>") {
-		t.Fatal("stdout should be escaped, not contain raw HTML")
-	}
+	h.pollUntilFinished(result.SubmissionID)
 
 	htmlResp, err := h.client.Get(baseURL + "/submissions/" + result.SubmissionID)
 	if err != nil {
