@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -30,13 +31,41 @@ func (f *fakeClock) Advance(d time.Duration) {
 
 func testRedisClient(t *testing.T) *redis.Client {
 	t.Helper()
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		addr = "127.0.0.1:6379"
+	}
 	client := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
+		Addr: addr,
 		DB:   9,
 	})
-	if err := client.Ping(context.Background()).Err(); err != nil {
-		t.Skipf("redis not available: %v", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	err := client.Ping(ctx).Err()
+	cancel()
+	if err != nil {
+		client.Close()
+		if os.Getenv("HUSTACK_REQUIRE_REDIS") == "1" {
+			t.Fatalf("required Redis unavailable: %v", err)
+		}
+		t.Skipf("Redis unavailable: %v", err)
 	}
+	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+	err = client.FlushDB(ctx).Err()
+	cancel()
+	if err != nil {
+		client.Close()
+		t.Fatalf("flush isolated Redis test database before test: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := client.FlushDB(ctx).Err(); err != nil {
+			t.Errorf("flush isolated Redis test database after test: %v", err)
+		}
+		if err := client.Close(); err != nil {
+			t.Errorf("close Redis test client: %v", err)
+		}
+	})
 	return client
 }
 
@@ -50,10 +79,6 @@ func testRL(t *testing.T) *RateLimiter {
 		PollRatePerMinute:     60,
 	}
 	rl := New(client, cfg)
-	t.Cleanup(func() {
-		rl.FlushDB(context.Background())
-		rl.Close()
-	})
 	return rl
 }
 
@@ -69,10 +94,6 @@ func testRLWithClock(t *testing.T) (*RateLimiter, *fakeClock) {
 	rl := New(client, cfg)
 	fc := &fakeClock{now: time.Now()}
 	rl.SetClock(fc)
-	t.Cleanup(func() {
-		rl.FlushDB(context.Background())
-		rl.Close()
-	})
 	return rl, fc
 }
 

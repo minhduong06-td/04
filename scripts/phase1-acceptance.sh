@@ -20,7 +20,7 @@ run_no_skip() {
         return 1
     fi
     cat "$output"
-    if grep -E -- '--- SKIP:|redis unavailable|postgres unavailable|connection refused' "$output"; then
+    if grep -Ei -- '---[[:space:]]+SKIP:|redis[[:space:]]+(unavailable|not available)|postgres(ql)?[[:space:]]+(unavailable|not available)|connection refused' "$output"; then
         rm -f "$output"
         echo "required test output contains a skip/unavailable marker" >&2
         return 1
@@ -80,6 +80,8 @@ run_no_skip env DATABASE_URL=postgres://hustack:hustack@127.0.0.1:25432/hustack?
 run_no_skip env DATABASE_URL=postgres://hustack:hustack@127.0.0.1:25432/hustack?sslmode=disable HUSTACK_REQUIRE_POSTGRES=1 go test -race ./internal/database -count=1
 run_no_skip env REDIS_ADDR=127.0.0.1:26379 HUSTACK_REQUIRE_REDIS=1 go test -v ./internal/queue -count=1
 run_no_skip env REDIS_ADDR=127.0.0.1:26379 HUSTACK_REQUIRE_REDIS=1 go test -race ./internal/queue -count=1
+run_no_skip env REDIS_ADDR=127.0.0.1:26379 HUSTACK_REQUIRE_REDIS=1 go test -v ./internal/ratelimit -count=1
+run_no_skip env REDIS_ADDR=127.0.0.1:26379 HUSTACK_REQUIRE_REDIS=1 go test -race ./internal/ratelimit -count=1
 run_no_skip go test -v -tags=phase1acceptance ./tests -run 'TestApplicationParticipantRateLimit|TestNginxSubmissionRateLimit|TestActualHostileResultUsesTextOnlySink' -count=1
 
 ACCEPT_QUEUE_MAX_DEPTH=1 ACCEPT_SUBMIT_RATE_PER_MINUTE=100 $ACCEPT up -d --force-recreate api mock-worker

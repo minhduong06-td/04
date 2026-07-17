@@ -65,9 +65,32 @@ docker compose config --quiet                                         PASS
 git diff --check                                                       PASS
 ```
 
-The clean gate ran 41 ordinary Go test cases, 24 normal HTTP integration cases,
-4 isolated compliance cases, 3 real PostgreSQL cases plus their race run, and 6
-real Redis 7 cases plus their race run. Required skipped-test count: **0**.
+The clean gate classifies test coverage instead of mixing optional developer
+runs with required dependency tests:
+
+- 38 dependency-free internal test cases, run normally and with the race detector;
+- 3 required real PostgreSQL cases, plus their race run;
+- 6 required real Redis 7 queue cases, plus their race run;
+- 6 required real Redis 7 rate-limit cases, plus their race run;
+- 24 normal HTTP integration cases; and
+- 4 isolated compliance cases.
+
+That is 134 classified case executions in the clean gate. Required skipped-test
+count: **0**. The closure narrow gate additionally ran all six rate-limit cases
+10 times (60 executions) and under the race detector 5 times (30 executions),
+also with zero skips.
+
+Required Redis rate-limit commands in the clean gate are:
+
+```text
+REDIS_ADDR=127.0.0.1:26379 HUSTACK_REQUIRE_REDIS=1 go test -v ./internal/ratelimit -count=1       PASS (6/6)
+REDIS_ADDR=127.0.0.1:26379 HUSTACK_REQUIRE_REDIS=1 go test -race ./internal/ratelimit -count=1    PASS (6/6)
+```
+
+The six executed cases are `TestParticipantSubmitRateLimit`,
+`TestIPSubmitRateLimit`, `TestTokenRefill`,
+`TestDifferentParticipantsDontAffect`, `TestNoRaceOnRefresh`, and
+`TestPollRateLimit`.
 
 The isolated cases prove all previously missing acceptance evidence:
 
@@ -91,8 +114,8 @@ The acceptance sequence ran `docker compose down -v --remove-orphans`, then
 `docker compose build --no-cache api mock-worker`, followed by force recreation.
 Fresh image IDs reported were:
 
-- API: `sha256:e33f708195c400f38f9e86609fcbdc81c878caffae6adfa90da542ba7b5013bd`
-- mock-worker: `sha256:e5bdc7106ba5c80fc6ef0204a99b1a84b8cced431b8d41d0772622d564c33b60`
+- API: `sha256:4b0450b941578a2db624f5feeeecac5dd5bccac236847b3c224eea7293565a01`
+- mock-worker: `sha256:c7bdfa988bc8eb1e2b0b34238bb22e1f6398682821c29ea58785169d801d2b1c`
 
 PostgreSQL, Redis, API, and Nginx reported healthy; mock-worker remained running.
 Only Nginx publishes a host port. Readiness checks PostgreSQL, Redis, and an
@@ -104,7 +127,8 @@ responses, asynchronous completion, owner-only access, actual hostile result
 handling, size limits including 10 MiB boundaries, CSRF/origin handling,
 application and Nginx 429 responses, global-capacity 503 atomicity, and health
 routes. Database concurrency tests verify participant/global quotas and one
-running job per participant; minute/hour/IP token buckets retain unit coverage.
+running job per participant. Minute/hour/IP/poll token buckets are now required
+real-Redis tests rather than optional developer-only coverage.
 
 `make phase1-acceptance` is the reproducible destructive gate. It starts with a
 volume-clean normal stack and no-cache API/worker build, runs normal tests, then
