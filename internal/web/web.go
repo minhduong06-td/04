@@ -212,13 +212,11 @@ func (s *Server) handleCreateSubmission(w http.ResponseWriter, r *http.Request) 
 		case errors.Is(err, submissions.ErrContainsNUL),
 			errors.Is(err, storage.ErrContainsNUL):
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "source contains NUL byte"})
-		case errors.Is(err, queue.ErrQueueFull):
+		case errors.Is(err, database.ErrGlobalCapacity):
 			w.Header().Set("Retry-After", "15")
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "system is busy"})
-		case errors.Is(err, queue.ErrQueuedQuota):
+		case errors.Is(err, database.ErrParticipantQueuedQuota):
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "queued submission quota exceeded"})
-		case errors.Is(err, queue.ErrRunningQuota):
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "running submission quota exceeded"})
 		default:
 			s.logger.Error("create submission", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})

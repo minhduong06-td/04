@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/signal"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -22,190 +22,128 @@ func main() {
 		slog.Error("config load failed", "error", err)
 		os.Exit(1)
 	}
-
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			if a.Key == slog.TimeKey {
-				return slog.Attr{}
-			}
-			return a
-		},
-	}))
-	slog.SetDefault(logger)
-
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	db, err := database.Connect(cfg.DatabaseURL)
 	if err != nil {
 		logger.Error("database connect", "error", err)
 		os.Exit(1)
 	}
 	defer db.Close()
-
-	redisClient := redis.NewClient(&redis.Options{
-		Addr: cfg.RedisAddr,
-		DB:   0,
-	})
-	if err := redisClient.Ping(context.Background()).Err(); err != nil {
-		logger.Error("redis ping", "error", err)
+	rc := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	defer rc.Close()
+	q := queue.NewStream(rc, cfg.QueueRedisKey, cfg.StreamGroup, cfg.StreamConsumer, cfg.RedisOperationTimeout)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	if err := q.EnsureConsumerGroup(ctx); err != nil {
+		logger.Error("consumer group", "error", err)
 		os.Exit(1)
 	}
-	defer redisClient.Close()
-
-	q := queue.New(redisClient, cfg.QueueRedisKey)
-
-	logger.Info("mock worker starting",
-		"work_duration", cfg.MockWorkDuration,
-	)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigCh
-		logger.Info("shutting down worker")
-		cancel()
-	}()
-
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				recovered, err := q.RecoverStale(2 * time.Minute)
-				if err != nil {
-					logger.Warn("stale recovery scan", "error", err)
-					continue
-				}
-				for _, item := range recovered {
-					ok, err := db.RecoverToQueued(ctx, item.SubmissionID)
-					if err != nil {
-						logger.Error("stale recovery db", "submission_id", item.SubmissionID, "error", err)
-						continue
-					}
-					if !ok {
-						logger.Warn("stale recovery: DB row not in mock_processing",
-							"submission_id", item.SubmissionID,
-						)
-						q.Complete(item.SubmissionID, item.ParticipantID)
-						continue
-					}
-					if err := q.RecoverOne(item.SubmissionID, item.ParticipantID); err != nil {
-						logger.Error("stale recovery redis", "submission_id", item.SubmissionID, "error", err)
-					} else {
-						logger.Info("stale job recovered",
-							"submission_id", item.SubmissionID,
-							"participant_id", item.ParticipantID[:8],
-						)
-					}
-				}
-			}
-		}
-	}()
-
-	var running atomic.Int32
-	maxRunning := cfg.MaxRunningPerParticipant
-	processJobs(ctx, logger, cfg, db, q, &running, maxRunning)
+	go outboxLoop(ctx, logger, cfg, db, q)
+	go recoveryLoop(ctx, logger, cfg, db)
+	consumeLoop(ctx, logger, cfg, db, q)
 }
 
-func processJobs(ctx context.Context, logger *slog.Logger, cfg *config.Config, db *database.DB, q *queue.Queue, running *atomic.Int32, maxRunning int) {
+func outboxLoop(ctx context.Context, logger *slog.Logger, cfg *config.Config, db *database.DB, q *queue.Queue) {
+	t := time.NewTicker(cfg.OutboxPollInterval)
+	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Info("worker stopped")
 			return
-		default:
+		case <-t.C:
+			for i := 0; i < 100; i++ {
+				processed, err := db.ProcessNextOutbox(ctx, cfg.OutboxMaxBackoff, func(e database.OutboxEvent) error {
+					_, err := q.Enqueue(ctx, e.SubmissionID, e.ParticipantID)
+					return err
+				})
+				if err != nil {
+					logger.Warn("outbox dispatch", "error", err)
+					break
+				}
+				if !processed {
+					break
+				}
+			}
 		}
+	}
+}
 
-		job, err := q.Claim(3*time.Second, maxRunning)
+func recoveryLoop(ctx context.Context, logger *slog.Logger, cfg *config.Config, db *database.DB) {
+	t := time.NewTicker(cfg.WorkerStaleAfter / 2)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			ids, err := db.ListStaleProcessing(ctx, time.Now().Add(-cfg.WorkerStaleAfter), 100)
+			if err != nil {
+				logger.Warn("list stale", "error", err)
+				continue
+			}
+			for _, id := range ids {
+				if _, err := db.RecoverStaleSubmission(ctx, id, time.Now().Add(-cfg.WorkerStaleAfter)); err != nil {
+					logger.Warn("recover stale", "submission_id", id, "error", err)
+				}
+			}
+		}
+	}
+}
+
+func consumeLoop(ctx context.Context, logger *slog.Logger, cfg *config.Config, db *database.DB, q *queue.Queue) {
+	for ctx.Err() == nil {
+		job, err := q.ClaimStale(ctx, cfg.WorkerStaleAfter)
+		if errors.Is(err, queue.ErrNoJob) {
+			job, err = q.Claim(ctx, time.Second)
+		}
+		if errors.Is(err, queue.ErrNoJob) {
+			continue
+		}
+		if errors.Is(err, queue.ErrInvalidItem) {
+			logger.Warn("invalid stream item", "error", err)
+			continue
+		}
 		if err != nil {
-			if err == queue.ErrNoJob {
-				continue
-			}
-			if err == queue.ErrRunningQuota {
-				time.Sleep(500 * time.Millisecond)
-				continue
-			}
-			logger.Warn("claim error", "error", err)
+			logger.Warn("stream claim", "error", err)
 			time.Sleep(time.Second)
 			continue
 		}
+		processOne(ctx, logger, cfg, db, q, job)
+	}
+}
 
-		running.Add(1)
-		pid := job.ParticipantID
-		logger.Info("claimed submission",
-			"submission_id", job.SubmissionID,
-			"participant_id", pid[:8],
-		)
-
-		started, err := db.StartSubmissionConditional(ctx, job.SubmissionID)
-		if err != nil {
-			logger.Error("start submission error",
-				"submission_id", job.SubmissionID,
-				"error", err,
-			)
-			q.Fail(job.SubmissionID, pid)
-			_ = db.SetInternalError(ctx, job.SubmissionID)
-			running.Add(-1)
-			continue
+func processOne(parent context.Context, logger *slog.Logger, cfg *config.Config, db *database.DB, q *queue.Queue, job *queue.JobItem) {
+	result, err := db.TryStartSubmission(parent, job.SubmissionID, cfg.MaxRunningPerParticipant)
+	if err != nil {
+		logger.Warn("try start", "submission_id", job.SubmissionID, "error", err)
+		return
+	}
+	switch result {
+	case database.StartDuplicateOrTerminal, database.StartNotFound:
+		if err := q.Ack(parent, job.StreamID); err != nil {
+			logger.Warn("ack duplicate", "error", err)
 		}
-		if !started {
-			logger.Warn("duplicate delivery or already started",
-				"submission_id", job.SubmissionID,
-			)
-			q.Complete(job.SubmissionID, pid)
-			running.Add(-1)
-			continue
+		return
+	case database.StartQuotaBusy:
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, cfg.WorkerHardTimeout)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		_ = db.SetInternalError(context.Background(), job.SubmissionID)
+		_ = q.Ack(context.Background(), job.StreamID)
+		return
+	case <-time.After(cfg.MockWorkDuration):
+	}
+	finished, err := db.FinishSubmissionConditional(ctx, job.SubmissionID, true, "", "Phase 1 mock runner: source accepted\n", "", 0, false)
+	if err != nil {
+		logger.Warn("finish", "submission_id", job.SubmissionID, "error", err)
+		return
+	}
+	if finished {
+		if err := q.Ack(ctx, job.StreamID); err != nil {
+			logger.Warn("ack finished", "error", err)
 		}
-
-		select {
-		case <-ctx.Done():
-			logger.Info("shutdown during job, leaving for recovery",
-				"submission_id", job.SubmissionID,
-			)
-			running.Add(-1)
-			return
-		case <-time.After(cfg.MockWorkDuration):
-		}
-
-		finished, err := db.FinishSubmissionConditional(ctx, job.SubmissionID,
-			true, "", "Phase 1 mock runner: source accepted\n", "", 0, false,
-		)
-		if err != nil {
-			logger.Error("finish submission error",
-				"submission_id", job.SubmissionID,
-				"error", err,
-			)
-			q.Fail(job.SubmissionID, pid)
-			_ = db.SetInternalError(ctx, job.SubmissionID)
-			running.Add(-1)
-			continue
-		}
-		if !finished {
-			logger.Warn("finish failed: submission not in mock_processing",
-				"submission_id", job.SubmissionID,
-			)
-			q.Fail(job.SubmissionID, pid)
-			running.Add(-1)
-			continue
-		}
-
-		if err := q.Complete(job.SubmissionID, pid); err != nil {
-			logger.Warn("complete error",
-				"submission_id", job.SubmissionID,
-				"error", err,
-			)
-		}
-
-		running.Add(-1)
-		logger.Info("completed submission",
-			"submission_id", job.SubmissionID,
-			"participant_id", pid[:8],
-		)
 	}
 }

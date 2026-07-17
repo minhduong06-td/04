@@ -242,22 +242,12 @@ func (s *Service) CreateSubmission(r *http.Request, participantID, clientIP stri
 		"source_sha256", sourceSHA256,
 	)
 
-	row, err := s.db.CreateSubmission(ctx, submissionID, participantID, sourceFileName,
-		storageKey, sourceSize, sourceSHA256)
+	row, err := s.db.CreateSubmissionQueued(ctx, submissionID, participantID, sourceFileName,
+		storageKey, sourceSize, sourceSHA256, s.cfg.QueueMaxDepth, s.cfg.MaxQueuedPerParticipant)
 	if err != nil {
 		s.store.Delete(storageKey)
 		cleanupTemp()
 		return nil, fmt.Errorf("create submission: %w", err)
-	}
-
-	if err := s.queue.EnqueueCheck(submissionID, participantID,
-		s.cfg.QueueMaxDepth,
-		s.cfg.MaxQueuedPerParticipant,
-	); err != nil {
-		s.db.SetInternalError(ctx, submissionID)
-		s.store.Delete(storageKey)
-		cleanupTemp()
-		return nil, err
 	}
 
 	s.logger.Info("submission queued",
